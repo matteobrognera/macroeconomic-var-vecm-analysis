@@ -1,0 +1,685 @@
+---
+title: "Modelli statistici per dati economici"
+subtitle: "Analisi delle interdipendenze tra Petrolio, PPI e CPI"
+lang: it
+author: "Brognera Matteo & Saccon Pietro"
+# Lasciamo vuoto per evitare l'errore "Invalid Date" di Quarto
+date: "" 
+pdf-engine: pdflatex
+toc: true
+toc-title: "Indice"
+toc-depth: 3
+number-sections: true
+colorlinks: true
+format:
+  pdf:
+    papersize: a4
+    # Forza l'uso di PNG per evitare errori con pdfcrop.exe
+    knitr:
+      opts_chunk: 
+        dev: png
+    geometry:
+      - top=1in
+      - bottom=1in
+      - left=0.85in
+      - right=0.85in
+    include-in-header:
+      - text: |
+          \usepackage{enumitem}
+          \usepackage{fancyhdr}
+          \usepackage{lastpage}
+          \usepackage{titling}
+          \usepackage{graphicx}
+          
+          % Configurazione Header/Footer
+          \pagestyle{fancy}
+          \fancyhf{}
+          \fancyhead[L]{\textit{Modelli statistici per dati economici}}
+          \fancyfoot[C]{\thepage}
+          \renewcommand{\headrulewidth}{0.4pt}
+
+          % Personalizzazione Frontespizio con Logo
+          \pretitle{
+            \begin{center}
+            \includegraphics[width=4cm]{logo.png}\\[0.5cm]
+            \LARGE \textbf{Università degli Studi di Padova} \\
+            \Large Dipartimento di Scienze Statistiche \\
+            \rule{\textwidth}{0.4pt} \\[1.5cm]
+            \huge \bfseries
+          }
+          \posttitle{\end{center}}
+          
+          \preauthor{\begin{center} \vfill \large \textit{Studenti:} \\ \Large}
+          \postauthor{\end{center}}
+          
+          % Inserimento manuale della data per evitare errori di validazione
+          \predate{\begin{center} \large Anno Accademico 2025-2026}
+          \postdate{\end{center} \thispagestyle{empty} \clearpage}
+
+          % Forza l'indice su una pagina dedicata
+          \let\oldtableofcontents\tableofcontents
+          \renewcommand{\tableofcontents}{\oldtableofcontents\clearpage}
+---
+
+# Introduzione
+Il presente studio si pone l'obiettivo di analizzare le interdipendenze dinamiche tra il prezzo del petrolio, i prezzi alla produzione (PPI) e l'indice dei prezzi al consumo (CPI). Attraverso l'impiego di modelli econometrici per serie storiche, quali il Vector Autoregression (VAR) e il Vector Error Correction Model (VECM), l'analisi indaga sia la capacità predittiva reciproca delle variabili che l'esistenza di legami strutturali di lungo periodo. Particolare attenzione è rivolta alla diagnostica del modello e alla sua robustezza, testando la stabilità del sistema e la qualità dei residui, per poi passare a una valutazione della performance previsiva.
+
+# Descrizione dei Dati
+In questo capitolo vengono presentate le serie storiche utilizzate nell'analisi. 
+I dati sono stati scaricati dal database \textit{Federal Reserve Economic Data} (FRED), 
+una delle principali fonti internazionali per indicatori macroeconomici, finanziari e reali. 
+L'obiettivo è costruire un dataset mensile, a partire dal 1970, contenente variabili 
+rilevanti per lo studio dell'attività economica e delle dinamiche produttive negli Stati Uniti.
+
+## Fonti e Frequenza dei Dati
+Le serie sono state scaricate tramite l'API ufficiale FRED utilizzando il pacchetto \texttt{fredr} in linguaggio R. Tutte le variabili selezionate sono già disponibili in frequenza mensile, pertanto non è stato necessario effettuare conversioni o aggregazioni. Il periodo considerato va da gennaio 1970 fino ad agosto 2025, compatibilmente con la disponibilità delle serie.
+
+```{r}
+# scarica serie gemini:
+# librerie: 
+library(fredr)
+library(tidyverse)
+library(lubridate)
+library(writexl)
+
+
+# Scarica e exel serie ----
+# Set your FRED API key
+fredr_set_key("2869b6dcb766b4ad6abab5fc37761494")
+scarica_serie <- function(codice, nome_locale) {
+  fredr(
+    series_id = codice,
+    observation_start = as.Date("1970-01-01"),
+    frequency = "m",
+    aggregation_method = "avg"
+  ) %>%
+    dplyr::select(date, value) %>%
+    dplyr::rename(!!nome_locale := value)
+}
+
+# ----------- LISTA SERIE
+serie_mensili <- list(
+  CPIAUCSL = "prezzi_consumo_cpi",
+  WTISPLC  = "prezzo_petrolio", 
+  PPIACO   = "prezzi_produzione_ppi"
+)
+
+# ----------- DOWNLOAD AND MERGE LOOP 
+mensili_df_final <- NULL # Inizializziamo il dataframe vuoto
+
+for (codice in names(serie_mensili)) {
+  
+  nome_locale <- serie_mensili[[codice]]
+  
+  # Scarico la serie
+  message(paste("Scaricamento di:", nome_locale, "..."))
+  serie <- scarica_serie(codice, nome_locale)
+  
+  # Logica di unione 
+  if (is.null(mensili_df_final)) {
+    mensili_df_final <- serie
+  } else {
+    mensili_df_final <- full_join(mensili_df_final, serie, by = "date")
+  }
+}
+
+# Ordino per data per pulizia
+mensili_df_final <- mensili_df_final %>% arrange(date)
+
+# ----------- EXPORT TO EXCEL
+write_xlsx(
+  list(
+    "Dati_Economici" = mensili_df_final
+  ),
+  path = "serie_economici_fred.xlsx"
+)
+
+message("File Excel salvato: serie_economici_fred.xlsx")
+
+# Intro ACF e CCF ----
+library(readxl)
+# 1. Leggi il file Excel
+serie_mens <- read_excel("serie_economici_fred.xlsx")
+
+# 2. Converti la colonna 'date' in oggetto Date (se non lo è già)
+serie_mens$date <- as.Date(serie_mens$date)
+
+# 3. Filtra il periodo desiderato
+serie_mens_filtrata <- serie_mens %>%
+  filter(date >= as.Date("1970-01-01") & date <= as.Date("2025-08-01"))
+
+# 4. Crea oggetto ts (escludendo la colonna data)
+data_mens <- ts(serie_mens_filtrata[, -1], start = c(1970, 1), frequency = 12)
+```
+## Serie Utilizzate
+Le variabili selezionate rappresentano indicatori chiave dell'attività economica reale e delle condizioni finanziarie. Le serie e i codici FRED utilizzati nel codice R sono i seguenti:
+
+\begin{itemize}
+\item Indice dei prezzi al consumo (CPI) (CPIAUCSL):  misura il livello medio dei prezzi pagati dai consumatori urbani per un paniere rappresentativo di beni e servizi. È l’indicatore di riferimento per monitorare l’inflazione al consumo e valutare il potere d’acquisto delle famiglie.
+(https://fred.stlouisfed.org/series/CPIAUCSL)
+
+\item Prezzo spot del petrolio WTI (WTISPLC): rappresenta il prezzo di mercato del petrolio West Texas Intermediate, una delle principali benchmark crude oils a livello globale. È una variabile cruciale per comprendere l’evoluzione dei costi energetici e il loro impatto sull’economia reale.
+(https://fred.stlouisfed.org/series/WTISPLC)
+
+\item Indice dei prezzi alla produzione (PPI) (PPIACO): misura la variazione media dei prezzi ricevuti dai produttori per beni e servizi venduti sul mercato interno. È un indicatore anticipatore delle pressioni inflazionistiche lungo la catena produttiva.
+(https://fred.stlouisfed.org/series/PPIACO)
+\end{itemize}
+
+Il seguente codice mostra la struttura finale delle serie: 
+```{r, fig.width=7, fig.height=6} 
+start(data_mens) 
+end(data_mens) 
+head(data_mens)
+tail(data_mens)
+```
+\newpage
+# Analisi preliminare delle serie storiche
+In questa sezione vengono presentate le analisi esplorative condotte sulle serie storiche selezionate: \textit{prezzi consumo cpi}, \textit{prezzo petrolio} e \textit{prezzi produzione ppi}. L'obiettivo è valutare la natura delle serie, la presenza di trend, stagionalità, autocorrelazione e la necessità di eventuali trasformazioni preliminari.
+
+## Visualizzazioni iniziali (livelli, ACF, PACF)
+
+```{r, fig.width=7, fig.height=6}
+par(mfrow=c(3,3))
+for(i in 1:3){
+  ts.plot(data_mens[, i], ylab = colnames(data_mens)[i])
+  acf(data_mens[, i], main="", lag=40)
+  pacf(data_mens[, i], main="", lag=40)
+}
+par(mfrow = c(1,1))
+```
+Si osserva che: 
+
+\begin{itemize}
+\item Le serie mostrano un trend e possibili effetti di crescita a lungo periodo (tipico per indici/serie di prezzi).
+
+\item Le ACF mostrano autocorrelazioni elevate e lente decrescenze, segnale di non stazionarietà.
+\end{itemize}
+
+## Trasformazione logaritmica e differenziazione
+Per rendere le serie confrontabili e stabilizzare la varianza abbiamo applicato la trasformazione logaritmica (data la natura delle serie che trattano prezzi o indici di prezzi) e la prima differenzazione:
+```{r, fig.width=7, fig.height=6}
+serie_diff <- diff(log(data_mens))
+par(mfrow=c(3,3))
+for(i in 1:3){
+  ts.plot(serie_diff[, i], ylab = colnames(serie_diff)[i])
+  acf(serie_diff[, i], main="", lag=40)
+  pacf(serie_diff[, i], main="", lag=40)
+}
+par(mfrow = c(1,1))
+```
+L'applicazione delle log-differenze ha rimosso efficacemente il trend nel prezzo del petrolio e nel PPI, stabilizzandone la media. Tuttavia, la lenta decrescita dell'ACF relativa ai prezzi al consumo (CPI) suggerisce che la serie conservi un'elevata persistenza o un trend residuo, indicando una stazionarietà incompleta nonostante la trasformazione.
+
+## Cross-correlazioni (CCF)
+Le funzioni di correlazione incrociata (CCF) sono state calcolate per valutare le relazioni dinamiche tra le variabili.
+
+```{r, fig.width=7, fig.height=6}
+### cross-correlazioni ----
+prezzi_consumo_cpi <- data_mens[,1]
+prezzo_petrolio <- data_mens[,2]
+prezzi_produzione_ppi <- data_mens[,3]
+
+par(mfcol=c(2,1))
+ccf(prezzi_consumo_cpi, prezzo_petrolio, 30, col="red", 
+    main="CCF: prezzi_consumo_cpi e prezzo_petrolio")
+ccf(diff(log(prezzi_consumo_cpi)), diff(log(prezzo_petrolio)), 30, col="red", 
+    main="CCF serie log-differenziate: prezzi_consumo_cpi e prezzo_petrolio")
+par(mfcol=c(1,1))
+
+```
+L'analisi della funzione di cross-correlazione tra l'indice dei prezzi al consumo (CPI) e il prezzo del petrolio evidenzia due aspetti fondamentali: il primo grafico mostra valori di CCF costantemente elevati e persistenti. Tale pattern è sintomatico della non stazionarietà delle serie originali (presenza di trend), suggerendo il rischio di correlazione spuria. Il grafico inferiore, calcolato sulle prime differenze per garantire la stazionarietà, rivela la reale struttura di interdipendenza: si osserva un picco positivo significativo al lag zero, indicando che variazioni nel prezzo del petrolio si riflettono immediatamente sul CPI. La presenza di picchi significativi nei lag positivi suggerisce che il prezzo del petrolio agisce come variabile anticipatrice, influenzando il CPI nei periodi successivi. L'assenza di correlazione significativa nei lag negativi esclude un feedback inverso. In conclusione, l'analisi conferma una relazione diretta e unidirezionale: shock positivi nel mercato energetico tendono a trasmettersi ai prezzi al consumo sia istantaneamente che con una moderata persistenza temporale fino a quasi 3 mesi.
+
+```{r, fig.width=7, fig.height=6}
+par(mfcol=c(2,1))
+ccf(prezzi_consumo_cpi, prezzi_produzione_ppi, 30, col="red", 
+    main="CCF: prezzi_consumo_cpi e prezzi_produzione_ppi")
+ccf(diff(log(prezzi_consumo_cpi)), diff(log(prezzi_produzione_ppi)), 30, col="red", 
+    main="CCF serie log-differenziate: prezzi_consumo_cpi e prezzi_produzione_ppi")
+par(mfcol=c(1,1))
+```
+L'analisi della correlazione incrociata tra i prezzi al consumo (CPI) e i prezzi alla produzione evidenzia una dinamica di trasmissione dei costi: il grafico superiore conferma la presenza di trend comuni non stazionari, con una CCF che decade molto lentamente, rendendo necessaria l'analisi sulle differenze prime per identificare i legami. Il grafico inferiore mostra una struttura di lag più articolata rispetto al caso precedente: si osserva il picco più significativo in corrispondenza del lag zero, indicando una forte sincronia tra le variazioni dei costi di produzione e i prezzi al consumo finali.  La persistenza di barre significative nei lag positivi indica che le variazioni dei prezzi alla produzione continuano a influenzare il CPI anche nei mesi successivi. Tra le due variabili si nota una relazione bilaterale. 
+
+```{r, fig.width=7, fig.height=6}
+par(mfcol=c(2,1))
+ccf(prezzo_petrolio, prezzi_produzione_ppi, 30, col="red", 
+    main="CCF: prezzo_petrolio e prezzi_produzione_ppi")
+ccf(diff(log(prezzo_petrolio)), diff(log(prezzi_produzione_ppi)), 30, col="red", 
+    main="CCF serie log-differenziate: prezzo_petrolio e prezzi_produzione_ppi")
+par(mfcol=c(1,1))
+```
+Il grafico mostra la funzione di cross-correlazione (CCF) tra il prezzo del petrolio e l’indice dei prezzi alla produzione. Nel primo riquadro, le serie mostrano una correlazione elevata e persistente per tutti i lag, riconducibile alla non-stazionarietà delle serie. Nel secondo riquadro, l'analisi sulle serie log-differenziate rivela la vera dinamica. La correlazione è massima e significativa al lag 0, indicando che la relazione tra le variazioni del prezzo del petrolio e del PPI è principalmente simultanea. È tuttavia di particolare interesse la presenza di valori significativi nei lag negativi. Questi suggeriscono che l'indice dei prezzi del petrolio funga da indicatore anticipatore per i prezzi alla produzione. In altre parole, le variazioni nei prezzi del petrolio tendono a precedere e riflettersi sui movimenti della produzione nei mesi successivi.
+
+In conclusione notiamo che tutte e tre le serie sono cross-correlate simultaneamente e il prezzo del petrolio è una variabile guida per il prezzo al consumo e per il prezzo alla produzione. 
+
+\newpage
+
+# Modello Transfer Function
+In questa sezione è stato esplorato l'utilizzo di un modello \textit{Transfer Function} (TF).
+Il modello \textit{Transfer Function} (TF) è uno strumento utilizzato per analizzare la relazione tra \textbf{Prezzo del prtrolio} e \textbf{Prezzo al consumo}. A differenza di una semplice regressione statica, il modello TF permette di catturare effetti ritardati, ovvero situazioni in cui l’input influenza l’output dopo un certo numero di periodi.
+L'obiettivo era verificare se esistesse un effetto ritardato, tale da giustificare l'applicazione di un modello TF.
+
+## Trasformazione e pre-whitening delle serie
+```{r, fig.width=7, fig.height=6}
+library(MTS)       # tfm1
+library(arfima)    # SeriesJ
+library(forecast)  # Arima
+
+y <- data_mens[,1] # variabile prezzi consumo
+x <- data_mens[,2] # variabile prezzo petrolio
+y <- diff(log(y))
+x <- diff(log(x))
+```
+
+Le serie sono state trasformate per garantire la stazionarietà:
+\begin{itemize}
+    \item La variabile input è stata log-differenziata: \texttt{diff(log(Prezzo del petrolio))}.
+    \item La variabile output è stata log-differenziata: \texttt{diff(log(Prezzo consumi CPI))}.
+\end{itemize}
+
+```{r, fig.width=7, fig.height=6}
+par(mfcol = c(3,1))
+acf(x, main = "ACF prezzo petrolio (log-diff)")
+acf(y, main = "ACF prezzi consumi (log-diff)")
+ccf(y, x, main = "CCF (y, x)")
+par(mfcol = c(1,1))
+
+
+par(mfcol = c(2,1))
+acf(x)
+pacf(x)
+# modello per sbiancare corretto AR(1) o AR(2)
+mx.1 <- Arima(x, order = c(1,0,0), include.mean = F)
+
+mx.2 <- Arima(x, order = c(2,0,0), include.mean = F)
+
+AIC(mx.1, mx.2)
+cbind(mx.1$bic, mx.2$bic)
+# leggermente meglio il secondo modello per AIC, e meglio il primo modello per bic  
+# preferisco il primo perché più parsimonioso. 
+acf(mx.1$residuals, main="ACF modello AR(1)")
+pacf(mx.1$residuals,, main="PACF modello AR(1)")
+# i residui sono buoni
+# dunque il modello scelto per sbiancare la serie y è il primo (AR(1)).
+
+alfa <- mx.1$residuals
+
+my.1 <- arima(y, order = c(1,0,0), include.mean = F,
+              fixed = c(mx.1$coef[1]))
+
+beta <- my.1$residuals
+```
+
+Successivamente, è stato stimato un modello AR(1) per l'input, scelto per la sua parsimonia e buone proprietà dei residui. I residui di questo modello (\texttt{alfa}) sono stati utilizzati come input sbiancato. Analogamente, è stato stimato un modello AR(1) per l'output, vincolando il coefficiente autoregressivo al valore stimato sull'input, ottenendo i residui \texttt{beta}. Questo permette di eliminare dalle serie le autocorrelazioni presenti e fare emergere la sola cross-correlazione tra le due.
+
+## Analisi della Correlazione Residuale
+
+```{r, fig.width=7, fig.height=6}
+par(mfrow=c(1,1))
+ccf(alfa, beta, lag.max = 10, main = "CCF(alfa, beta)")
+```
+L'analisi della funzione di cross-correlazione (CCF) tra il prezzo del petrolio e l'indice dei prezzi al consumo, condotta dopo la fase di sbiancamento (pre-whitening) delle serie, evidenzia l'inadeguatezza di un modello di Transfer Function (TF) per descrivere questa relazione. Il grafico mostra infatti che il picco di correlazione più significativo si trova principalmente al lag 0, indicando un legame simultaneo anziché ritardato. Poiché un modello TF presuppone che la variabile di input influenzi l'output con un ritardo temporale misurabile, l'assenza di questa distanza rende il modello concettualmente inappropriato. Inoltre, la presenza di correlazione nei lag negativi suggerisce che l'indice dei prezzi del petrolio possa agire da indicatore anticipatore per i prezzi della produzione. In sintesi, la dinamica istantanea rilevata suggerisce di abbandonare il TF a favore  di un modello VAR.
+
+\newpage
+# Modelli VAR
+In questo capitolo viene implementato un modello di Vector Autoregression (VAR) per analizzare le interdipendenze dinamiche tra i prezzi al consumo (CPI), il prezzo del petrolio e i prezzi alla produzione (PPI). L'obiettivo è catturare come gli shock energetici e i costi di produzione si trasmettano lungo la catena del valore.
+
+## Trasformazione dei dati e selezione dell' ordine ($p$)
+Per garantire la stazionarietà del sistema, necessaria per una stima corretta del VAR, le serie storiche originali sono state trasformate in differenze logaritmiche. Questa operazione permette di interpretare i dati in termini di tassi di variazione mensile, eliminando i trend deterministici comuni alle tre variabili.Un passaggio critico nella costruzione del modello è la scelta del numero di ritardi ($p$). Un numero troppo esiguo di lag potrebbe non catturare l'intera dinamica del sistema, mentre un numero eccessivo rischierebbe di ridurre drasticamente i gradi di libertà (overfitting).
+```{r, fig.width=7, fig.height=6}
+library(vars)
+library(urca) 
+library(lmtest)
+
+data_trans <- data_mens
+# Trasformazione Log-Difference per tutte le serie 
+data_trans[,1] <- c(NA, diff(log(data_mens[,1])))
+data_trans[,2] <- c(NA, diff(log(data_mens[,2])))
+data_trans[,3] <- c(NA, diff(log(data_mens[,3])))
+# Rimuovi la prima riga che conterrà NA a causa della differenziazione
+data_trans <- na.omit(data_trans)
+ICsel <- VARselect(data_trans, lag.max = 20, type = "const")
+ICsel$selection
+```
+
+Per determinare il valore ottimale di $p$, sono stati calcolati i criteri di informazione su un massimo di 20 ritardi:
+\begin{itemize}
+\item Schwarz Criterion (SC): Suggerisce il modello più parsimonioso con 1 solo lag, minimizzando il rischio di sovra-parametrizzazione.
+\item Hannan-Quinn (HQ): Indica un compromesso con 3 lag, valore spesso preferito in letteratura per dati mensili poiché bilancia precisione e semplicità.
+\item Akaike Information Criterion (AIC): Propone un modello più complesso con 12 lag, probabilmente per catturare la stagionalità annuale o le dinamiche più persistenti del CPI.
+\end{itemize}
+Data la natura mensile dei dati e la necessità di modellare la trasmissione degli shock che tipicamente richiede diversi mesi per manifestarsi pienamente, si procede con la stima dei modelli basati sulla scelta del numero di questi ritardi ($p$).
+
+### Modello VAR(1)
+```{r, fig.width=7, fig.height=6}
+# VAR con p=1 ----
+modL1 <- vars::VAR(data_trans, p = 1, type = "const")
+# Valutazione residui
+res_modL1 <- resid(modL1)
+head(res_modL1)
+
+plot.ts(res_modL1)
+
+par(mfrow = c(3, 2))
+for(i in 1:NCOL(res_modL1)){
+  acf(res_modL1[,i], main = colnames(res_modL1)[i])
+  pacf(res_modL1[,i], main = colnames(res_modL1)[i])
+}
+par(mfrow = c(1, 1))
+
+par(mfrow = c(3, 1))
+ccf(res_modL1[, 1], res_modL1[, 2], main = "consumi & petrolio")
+ccf(res_modL1[, 1], res_modL1[, 3], main = "consumi & produzione")
+ccf(res_modL1[, 2], res_modL1[, 3], main = "produzione & petrolio")
+par(mfrow = c(1, 1))
+cor(res_modL1)
+```
+Il modello VAR(1) rappresenta la struttura più semplice, basata sulla memoria del solo mese precedente.
+\begin{itemize}
+\item Il prezzo del petrolio al tempo $t-1$ influenza positivamente sia il CPI ($p < 0.001$) che il PPI ($p < 0.001$). Tuttavia, l' $R^2$ per il prezzo del petrolio è molto basso (0.056), confermando che questa variabile è prevalentemente esogena rispetto al sistema. 
+\item I grafici ACF e PACF dei residui mostrano tipicamente picchi oltre le soglie di confidenza, indicando che un modello con $p=1$ non elimina l'autocorrelazione. Le matrici di correlazione dei residui mostrano valori elevati (0.60 tra CPI e PPI), suggerendo la presenza di forti shock simultanei non catturati dal modello.
+\end{itemize}
+
+### Modello VAR(3)
+```{r, fig.width=7, fig.height=6}
+modL2 <- vars::VAR(y = data_trans, p = 3, type = "const")
+## Res modL2 ----
+res_modL2 <- resid(modL2)
+head(res_modL2)
+
+plot.ts(res_modL2)
+
+par(mfrow = c(3, 2))
+for(i in 1:NCOL(res_modL2)){
+  acf(res_modL2[,i], main = colnames(res_modL2)[i])
+  pacf(res_modL2[,i], main = colnames(res_modL2)[i])
+}
+par(mfrow = c(1, 1))
+
+par(mfrow = c(3, 1))
+ccf(res_modL2[, 1], res_modL2[, 2], main = "consumi & petrolio")
+ccf(res_modL2[, 1], res_modL2[, 3], main = "consumi & produzione")
+ccf(res_modL2[, 2], res_modL2[, 3], main = "produzione & petrolio")
+par(mfrow = c(1, 1))
+cor(res_modL2)
+```
+
+Il modello VAR(3), suggerito dal criterio HQ, estende l'analisi a un trimestre.
+\begin{itemize}
+\item Questo modello rivela che l'impatto del petrolio sul CPI non è solo immediato ($t-1$), ma presenta un effetto di "ritorno" negativo e significativo al lag 2 e 3. Questo suggerisce una dinamica di aggiustamento dei prezzi più complessa.
+\item Le radici del polinomio caratteristico sono tutte in modulo minori di uno (valore massimo 0.81), garantendo che il sistema sia stazionario e che gli shock convergano nel tempo.
+\end{itemize}
+
+### Modello VAR(12)
+```{r, fig.width=7, fig.height=6}
+# VAR p=12 (come consigliato da AIC) ----
+modL3 <- vars::VAR(y = data_trans, p = 12, type = "const")
+```
+Os
+```{r, fig.width=7, fig.height=6}
+## Res modL3 ----
+res_modL3 <- resid(modL3)
+plot.ts(res_modL3)
+par(mfrow = c(3, 2))
+for(i in 1:NCOL(res_modL3)){
+  acf(res_modL3[,i], main = colnames(res_modL3)[i])
+  pacf(res_modL3[,i], main = colnames(res_modL3)[i])
+}
+par(mfrow = c(1, 1))
+
+par(mfrow = c(3, 1))
+ccf(res_modL3[, 1], res_modL3[, 2], main = "consumi & petrolio")
+ccf(res_modL3[, 1], res_modL3[, 3], main = "consumi & produzione")
+ccf(res_modL3[, 2], res_modL3[, 3], main = "produzione & petrolio")
+par(mfrow = c(1, 1))
+cor(res_modL3)
+```
+Il modello VAR(12), suggerito dall'AIC, è il più complesso e mira a catturare l'intera dinamica annuale.
+\begin{itemize}
+\item In questo modello, molte variabili perdono significatività individuale a causa dell'elevato numero di parametri (overfitting), ma la capacità descrittiva complessiva aumenta ($R^2$ del CPI sale a 0.54). È interessante notare come il CPI al lag 12 sia fortemente significativo, confermando la presenza di una stagionalità o di una memoria di lungo periodo nei prezzi al consumo.
+\item Il VAR(12) è l'unico modello che riduce drasticamente l'autocorrelazione seriale. Tuttavia, i grafici  evidenziano "cluster di volatilità": i residui non hanno un'ampiezza costante, indicando che sebbene la media sia spiegata, la varianza (l'incertezza) cambia nel tempo (effetti ARCH).
+\end{itemize}
+
+### Scelta del modello finale
+```{r, fig.width=7, fig.height=6}
+round(ICsel$criteria[,c(1,3,12)], 4)
+```
+Per la selezione definitiva del numero di ritardi, si è proceduto a un confronto tra i diversi criteri di informazione. Sebbene i criteri di Schwarz (SC) e Hannan-Quinn (HQ) suggeriscano modelli più parsimoniosi rispettivamente con 1 e 3 lag, si è scelto di adottare la specifica con 12 ritardi indicata dall'Akaike Information Criterion (AIC), che presenta il valore più basso (-27.2735). Tale scelta è supportata dalla "regola del pollice" comunemente utilizzata nell'analisi di dati mensili: impostare $p=12$ permette infatti di catturare l'intera dinamica annuale e di correggere eventuali componenti stagionali residue, garantendo una completa rimozione dell'autocorrelazione dai residui, come confermato dai test diagnostici.
+
+## Test di diagnostica
+In questa sezione vengono eseguiti i test statistici per validare la robustezza del modello VAR(12) stimato. L'obiettivo è verificare che i residui non presentino strutture sistematiche residue.
+
+### Test Ljung-Box per l'autocorrelazione seriale univariata
+```{r, fig.width=7, fig.height=6}
+pval <- matrix(NA, 2, NCOL(res_modL3))
+colnames(pval) <- colnames(res_modL3)
+rownames(pval) <- c("r", "r^2")
+for(i in 1:NCOL(res_modL3)){
+  pval[1,i] <- Box.test(res_modL3[,i], lag=36, type="Lj")$p.val
+  pval[2,i] <- Box.test(res_modL3[,i]^2, lag=36, type="Lj")$p.val
+}
+round(pval, 5)
+```
+Per convalidare statisticamente il modello VAR(12), è stato eseguito il test di Ljung-Box sui residui (r) e sui residui al quadrato ($r^2$). Questo doppio controllo permette di verificare sia la corretta specifica della media (assenza di memoria lineare) sia la costanza della varianza (omoschedasticità).
+Dall'analisi della matrice dei p-value si traggono le seguenti conclusioni:
+\begin{itemize}
+\item Assenza di Autocorrelazione (r): i p-value relativi ai residui lineari sono estremamente elevati per tutte le variabili (0.922 per il CPI, 0.954 per il petrolio e 0.450 per il PPI). Non potendo rifiutare l'ipotesi nulla di indipendenza, si conferma che il modello a 12 lag cattura integralmente la dinamica temporale delle serie, trasformando i residui in rumore bianco.
+\item Presenza di Effetti ARCH ($r^2$): al contrario, i p-value calcolati sui residui al quadrato sono prossimi allo zero per ogni equazione del sistema. Il netto rifiuto dell'ipotesi nulla indica una forte presenza di eteroschedasticità.
+\end{itemize}
+
+### Analisi della stabilità del modello
+```{r, fig.width=7, fig.height=6}
+roots(modL3)
+```
+Un requisito fondamentale per l'affidabilità di un modello VAR è la sua stabilità. Un sistema è considerato stabile se, a seguito di uno shock esogeno, le variabili tendono a tornare nel tempo verso il loro equilibrio di lungo periodo anziché divergere all'infinito.
+Tecnicamente, la stabilità viene verificata analizzando le radici del polinomio caratteristico associato alla matrice dei coefficienti del VAR. Per la condizione di stabilità, è necessario che il modulo di tutte le radici sia strettamente inferiore a uno.
+L'output del comando mostra che tutti i 36 valori calcolati sono inferiori a 1.
+In conclusione il modello soddisfa la condizione di stabilità. Questo risultato garantisce la validità statistica delle analisi successive, in particolare per il calcolo delle Funzioni di Risposta Impulso (IRF) e della Decomposizione della Varianza (FEVD), poiché assicura che gli effetti degli shock si esauriscano gradualmente nel tempo senza rendere il sistema esplosivo.
+
+### Test di normalità dei residui (Jarque-Bera)
+```{r, fig.width=7, fig.height=6}
+normality.test(modL3)
+```
+Il test di Jarque-Bera (JB) verifica se i residui del modello seguono una distribuzione normale, analizzando congiuntamente due parametri fondamentali: l'asimmetria (Skewness) e la curtosi (Kurtosis).
+Dall'output del test multivariato emergono i seguenti risultati:
+\begin{itemize}
+\item Test JB Complessivo: il p-value è estremamente basso, portando al netto rifiuto dell'ipotesi nulla di normalità.
+\item Asimmetria (Skewness): il p-value quasi nullo indica che i residui non sono distribuiti simmetricamente attorno alla media.
+\item Curtosi (Kurtosis): il valore del Chi-quadrato è molto elevato (5422.6). Ciò significa che la distribuzione dei residui ha "code pesanti", ovvero si verificano shock estremi con una frequenza molto superiore a quella prevista da una distribuzione normale.
+\end{itemize}
+
+### Test di Portmanteau (Multivariato)
+```{r, fig.width=7, fig.height=6}
+serial.test(modL3, lags.pt=36, type = "PT.asymptotic")
+
+```
+Il test di Portmanteau è una verifica collettiva che analizza se i residui del sistema VAR nel suo insieme siano correlati fino a un certo numero di ritardi (in questo caso, 36). Serve a confermare che non vi sia informazione lineare residua trascurata dal modello. Il p-value ottenuto è 0.1133. Poiché il p-value è superiore alla soglia critica di 0.05, non rifiutiamo l'ipotesi nulla (assenza di autocorrelazione residua nel sistema). Questo risultato è di fondamentale importanza: a differenza del test eseguito su un modello con meno lag, il VAR(12) supera il test di Portmanteau. Questo conferma definitivamente che la scelta di un ordine di ritardo elevato ($p=12$) è stata corretta e necessaria per "ripulire" i residui e ottenere un modello statisticamente solido.
+
+### Test di Breusch-Godfrey (LM Test)
+```{r, fig.width=7, fig.height=6}
+serial.test(modL3, lags.bg = 36, type = "BG")
+```
+Proseguendo con la diagnostica sull'autocorrelazione è stato usato il test di Breusch-Godfrey (LM), generalmente considerato più robusto e affidabile in presenza di variabili endogene ritardate e quando non è garantita la perfetta normalità dei residui. Il test, calcolato su 36 ritardi, restituisce un p-value di 0.3765.Il valore è ampiamente superiore alla soglia critica dello 0.05, portando a non rifiutare l'ipotesi nulla di assenza di correlazione seriale.Questo risultato è particolarmente confortante: sebbene i test univariati avessero già dato esito positivo, la conferma multivariata tramite il test LM consolida l'idea che la struttura del VAR(12) sia ottimale.
+
+### Test ARCH Multivariato
+```{r, fig.width=7, fig.height=6}
+arch.test(modL3, lags.multi = 36)
+```
+La diagnostica riguarda la verifica della varianza costante nel tempo attraverso il test ARCH multivariato. Questo test analizza se esistano effetti di eteroschedasticità condizionata che colpiscono il sistema nel suo complesso, ovvero se la turbolenza in una variabile tenda a trasmettersi o a persistere nel sistema. Il test restituisce un Chi-quadrato di 1685.6 con un p-value estremamente basso. L'ipotesi nulla di omoschedasticità viene respinta.
+
+### Test di causalità di Granger e causalità istantanea
+```{r, fig.width=7, fig.height=6}
+causality(modL3, cause="prezzi_consumo_cpi")
+causality(modL3, cause="prezzo_petrolio") 
+causality(modL3, cause="prezzi_produzione_ppi") 
+```
+Il test di Granger implica una causalità, intesa come una capacità predittiva statistica. L'ipotesi nulla ($H_0$) afferma che la variabile "causa" non aiuta a prevedere le altre variabili del sistema.
+
+\begin{itemize}
+
+\item Prezzo del petrolio: il p-value è estremamente basso ($5.754 \times 10^{-10}$),quindi rifiutiamo con forza $H_0$. 
+Il petrolio risulta la variabile più esogena e influente del sistema. I suoi ritardi hanno un forte potere predittivo su CPI e PPI, in linea con la teoria economica secondo cui gli shock energetici si propagano rapidamente lungo la filiera dei prezzi.
+
+\item Prezzi al consumo (CPI): il p-value è pari a 0.0016, quindi rifiutiamo $H_0$. Il CPI mostra capacità predittiva significativa, sebbene inferiore a quella del petrolio. Ciò può riflettere meccanismi di retroazione in cui l’inflazione attesa influenza le decisioni di produzione.
+
+\item Prezzi alla produzione (PPI): il p-value è pari a 0.0644; accettiamo $H_0$ ai livelli di confidenza standard (1\% e 5\%). Una volta inclusi petrolio e CPI nel sistema con 12 ritardi, il PPI non aggiunge informazione predittiva significativa. Il suo contenuto informativo sembra già incorporato nei movimenti del prezzo del petrolio.
+\end{itemize}
+
+### Test di causalità di Granger bivariato
+```{r, fig.width=7, fig.height=6}
+grangertest(data_trans[,1], data_trans[,2], order=12)
+grangertest(data_trans[,1], data_trans[,3], order=12)
+grangertest(data_trans[,3], data_trans[,1], order=12)
+grangertest(data_trans[,3], data_trans[,2], order=12)
+grangertest(data_trans[,2], data_trans[,1], order=12)
+grangertest(data_trans[,2], data_trans[,3], order=12)
+```
+Abbiamo integrato i test di sistema con i test di Granger bivariati, analizzando ogni possibile coppia di variabili. Mentre il test di sistema ci diceva se una variabile influenzava le altre, questi test isolano le casualità specifiche.
+Dall'analisi emerge un sistema caratterizzato da una fortissima interdipendenza: il legame più potente è quello che va dal Petrolio al CPI. Questo è coerente con i risultati precedentemente ottenuti. A differenza del test di sistema precedente, il test bivariato rivela una causalità bidirezionale tra prezzi alla produzione e prezzi al consumo. I test bivariati mostrano che ogni variabile apporta un contributo informativo significativo per prevedere le altre. Questo risultato giustifica pienamente l'utilizzo di un modello VAR rispetto a modelli a singola equazione, poiché nessuna variabile può essere considerata puramente esogena nel lungo periodo. 
+
+### Analisi delle Funzioni di Risposta agli Impulsi (IRF)
+```{r, fig.width=7, fig.height=6}
+irf_chol <- irf(modL3, impulse = c("prezzi_consumo_cpi", "prezzo_petrolio",
+                                   "prezzi_produzione_ppi"),
+                response = c("prezzi_consumo_cpi", "prezzo_petrolio",
+                             "prezzi_produzione_ppi"),
+                n.ahead = 12, boot = TRUE, ortho = TRUE, runs = 1000)
+par(mfrow = c(3,3))
+plot(irf_chol, plot.type = "single")
+par(mfrow = c(1,1))
+
+```
+In questa sezione analizziamo graficamente come il sistema reagisce a uno shock esogeno (una variazione imprevista) in una delle tre variabili. Le Funzioni di Risposta Impulso (IRF) permettono di osservare la grandezza, la direzione e la durata degli effetti di tali shock sull'intero orizzonte temporale di 12 mesi.
+Le bande di confidenza (linee tratteggiate rosse) sono state calcolate tramite 1000 repliche Bootstrap, garantendo la validità statistica nonostante la non-normalità dei residui.
+
+Osservando la dinamica innescata dal prezzo del petrolio, lo shock si manifesta con la massima intensità nel momento iniziale per poi riassorbirsi gradualmente entro l'anno, confermando una persistenza moderata. È interessante notare come un aumento imprevisto del petrolio generi una pressione al rialzo immediata sia sui prezzi alla produzione che su quelli al consumo; in particolare, la risposta del CPI risulta decisamente persistente.
+Le IRF confermano che il prezzo del petrolio agisce come il principale motore del sistema, innescando reazioni a catena che influenzano l'intera struttura dei prezzi. La stabilità complessiva del modello è visibile nella tendenza di tutte le risposte a convergere verso lo zero entro i 12 mesi.
+
+### Decomposizione della varianza dell'errore di previsione (FEVD)
+```{r, fig.width=7, fig.height=6}
+vd <- fevd(modL3, n.ahead = 36)
+plot(vd)
+```
+L'analisi si conclude con la Decomposizione della Varianza (FEVD), che permette di quantificare l'importanza relativa di ogni variabile nello spiegare l'incertezza del sistema nel tempo.
+
+Per quanto riguarda i prezzi al consumo (CPI), la variabilità è dominata quasi interamente dalla componente inerziale. Sebbene nel brevissimo periodo il CPI spieghi il 100% di se stesso, già dopo pochi mesi il prezzo del petrolio arriva a determinare circa l'8-9% della sua varianza, mentre il contributo dei prezzi alla produzione (PPI) rimane marginale, stabilizzandosi intorno al 3%.
+Il prezzo del petrolio si conferma la variabile guida: oltre il 77% della sua variabilità di lungo periodo è spiegata da shock propri, consolidando il suo ruolo di motore esogeno del sistema. Al contrario, i prezzi alla produzione (PPI) risultano essere i più dipendenti dalle dinamiche esterne. A un orizzonte di tre anni, la varianza del PPI è spiegata per circa il 41% dal CPI e per il 17% dal petrolio, lasciando solo una quota paritaria alla propria componente autonoma.
+
+## Valutazione della performance predittiva
+L'ultima fase dell'analisi consiste nel testare la capacità del modello VAR di generare previsioni accurate per il CPI, confrontandola con un modello benchmark univariato (ARIMA (1,0,3 con drift)). La valutazione è stata effettuata tramite una procedura di rolling window su un orizzonte di 2 anni.
+```{r, fig.width=7, fig.height=6}
+Y <- data_trans
+target <- "prezzi_consumo_cpi"   # <-- cambiabile
+H <- 24                # <-- orizzonte 2 anni
+win <- 500             # <-- rolling window length
+#errori VAR e errori Univariato
+eV <- eU <- matrix(NA, nrow = (nrow(Y) - win - H + 1), ncol = H,
+                   dimnames = list(NULL, paste0("h", 1:H)))
+r <- 1
+for (t in win:(nrow(Y) - H)) {
+  tr <- 1:t   # expanding window
+  te <- (t + 1):(t + H)
+  # --- VAR multivariato ---
+  s <- VARselect(Y[1:t,], lag.max = 12, type = "const")
+  #scelgo col il AIC (var (12))
+  p <- s$selection[1]
+  fcV <- predict(vars::VAR(Y[tr, ], p = p, type = "const"), n.ahead = H)
+  yhatV <- fcV$fcst[[target]][1:H, "fcst"]
+  # --- ARIMA univariato ---
+  fitU <- auto.arima(Y[tr, target], seasonal = FALSE, d = 0, D = 0)
+  yhatU <- as.numeric(forecast(fitU, h = H)$mean)
+  # --- Valori veri e errori per orizzonte ---
+  ytrue <- Y[te, target]
+  eV[r, ] <- ytrue - yhatV
+  eU[r, ] <- ytrue - yhatU
+  r <- r + 1
+}
+
+# --- Valutazione per ciascun orizzonte ---
+RMSE_VAR <- sqrt(colMeans(eV^2, na.rm = TRUE))
+RMSE_UNI <- sqrt(colMeans(eU^2, na.rm = TRUE))
+
+DM <- sapply(1:H, function(h)
+  forecast::dm.test(eV[, h], eU[, h], h = H, power = 2, 
+                    varestimator = "bartlett")$p.value
+)
+results <- data.frame(h = 1:H, RMSE_VAR, RMSE_UNI, DM_pval = DM)
+print(results)
+```
+Dalle previsioni possiamo vedere che il modello VAR(12) generalmente predice meglio rispetto al modello ARIMA per lag superiori a 9.
+```{r, fig.width=7, fig.height=6}
+c(RMSE_VAR = sqrt(mean(eV^2)), RMSE_ARIMA = sqrt(mean(eU^2)))
+```
+Analizzando l'errore quadratico medio, si osserva che il modello VAR presenta un RMSE complessivo di 0.00283, leggermente inferiore a quello del modello ARIMA (0.00286). Questo suggerisce che, in media, l'integrazione delle informazioni provenienti dal prezzo del petrolio e dal PPI migliori la precisione delle previsioni sull'inflazione al consumo rispetto a un modello che utilizza esclusivamente i dati passati del CPI stesso.
+
+```{r, fig.width=7, fig.height=6}
+forecast::dm.test(eV, eU, h = H, power = 2)
+```
+È stato applicato il test di Diebold-Mariano per determinare se la capacità previsiva del modello VAR sia migliore rispetto al modello ARIMA.
+Il p-value finale è pari a 0.03177, essendo il valore inferiore allo 0.05, rifiutiamo l'ipotesi nulla di uguale accuratezza predittiva. Possiamo quindi affermare con confidenza statistica che il modello VAR(12) fornisce previsioni significativamente migliori rispetto al modello univariato.
+
+\newpage
+# Analisi di Cointegrazione e Modello VECM
+Dall'analisi preliminare è emerso che le serie storiche in esame presentano una natura non stazionaria, suggerendo la presenza di radici unitarie nei processi stocastici. Alla luce di tali evidenze, si indaga la possibile esistenza di una relazione di equilibrio di lungo periodo tra le variabili attraverso la metodologia della cointegrazione e modelli VECM.
+
+## Test Augmented Dickey-Fuller (ADF)
+Per verificare l'applicabilità del modello VECM, è stata indagata la natura stocastica delle serie tramite il test Augmented Dickey-Fuller (ADF).
+```{r, fig.width=7, fig.height=6}
+summary(ur.df(prezzi_consumo_cpi, type="trend", lags=12, selectlags = "BIC"))
+summary(ur.df(diff(prezzi_consumo_cpi), type="trend"))
+
+summary(ur.df(prezzo_petrolio, type="trend", lags=12, selectlags = "BIC"))
+summary(ur.df(prezzo_petrolio, type="drift", lags=12, selectlags = "BIC"))
+summary(ur.df(diff(prezzo_petrolio), type="drift"))
+
+summary(ur.df(prezzi_produzione_ppi, type="trend", lags=12, selectlags = "BIC"))
+summary(ur.df(diff(prezzi_produzione_ppi), type="trend"))
+```
+I test condotti sui livelli delle tre variabili (CPI, Petrolio, PPI) hanno mostrato statistiche (tau) superiori ai valori critici al 5%, portando al non rifiuto dell'ipotesi nulla di radice unitaria. Al contrario, le medesime prove condotte sulle differenze prime hanno prodotto statistiche significativamente inferiori ai valori critici (p-value < 0.01), confermando che tutte le serie sono integrate di ordine 1, $I(1)$. Essendo le variabili caratterizzate dallo stesso ordine di integrazione, si procede alla verifica della cointegrazione tramite il test di Johansen per identificare possibili relazioni di equilibrio di lungo periodo.
+
+## Test di Johansen
+```{r, fig.width=7, fig.height=6}
+train <- window(data_mens, end = c(2015, 12))
+test <- window(data_mens, start = c(2016, 1))
+
+vecm <- ca.jo(train, K = 3, type = "trace", ecdet="const")
+summary(vecm)
+```
+Basandoci sulla statistica della traccia (trace statistic), confrontiamo i valori calcolati con le soglie critiche:
+\begin{itemize}
+\item Rango $r=0$: Il valore del test (196.99) supera ampiamente il valore critico all'1\% (41.07), rifiutando l'ipotesi di assenza di cointegrazione.
+\item Rango $r \leq 1$: Il valore (30.52) è ancora superiore al valore critico  all'1\% (24.60).
+\item Rango $r \leq 2$: Il valore (6.44) è inferiore al valore critico al 10\% (7.52).
+\end{itemize}
+Quindi si scegli $r=2$ come ordine di cointegrazione.
+
+## Stima del modello VECM
+L'analisi prosegue con la stima del modello VECM, che permette di separare le dinamiche di breve periodo dalle relazioni di equilibrio di lungo periodo.
+```{r, fig.width=7, fig.height=6}
+VECM <- cajorls(vecm, r=2)
+
+beta <- VECM$beta
+beta
+```
+Il vettore $\beta$ estratto rappresenta il legame strutturale stabile tra le variabili nel lungo termine. Questi coefficenti indicano che, nel lungo periodo, esiste una relazione positiva e predominante tra i prezzi alla produzione e quelli al consumo (coefficiente 1.65). I prezzi al consumo sembrano quindi essere fortemente ancorati ai costi di produzione industriali.
+
+```{r, fig.width=7, fig.height=6}
+coeff_vecm <- VECM$rlm$coefficients
+coeff_vecm
+```
+La stima del modello VECM basata su un rango di cointegrazione pari a due permette di approfondire la complessità delle relazioni di equilibrio che governano il sistema. Attraverso la scomposizione della matrice $\beta$, il modello identifica due distinti vettori di cointegrazione, ciascuno dei quali rappresenta un legame strutturale indipendente tra le variabili. Il primo vettore, normalizzato rispetto ai prezzi al consumo, evidenzia una relazione predominante tra il CPI e i prezzi alla produzione. Il secondo vettore isola invece il legame tra la quotazione del petrolio e il PPI, catturando la trasmissione nel lungo periodo dei prezzi del petrolio nei prezzi alla produzione. L'analisi dei coefficienti di aggiustamento, o pesi $\alpha$, rivela dinamiche differenziate nella velocità di riallineamento verso questi equilibri. Il prezzo del petrolio emerge come la variabile più reattiva del sistema, mostrando una capacità di correzione degli squilibri significativamente più rapida rispetto alle altre serie. Al contrario, i prezzi al consumo manifestano una lentezza nel riassestarsi, con coefficienti di entità ridotta. 
+
+## Rappresentazione VAR del VECM 
+Per finalizzare l'analisi, il modello VECM è stato convertito in una forma VAR livellata tramite la funzione vec2var. Questa operazione permette di esprimere le relazioni di equilibrio stimate precedentemente in un formato utile per la generazione di previsioni dirette sui livelli delle serie storiche, mantenendo al contempo l'informazione strutturale del rango di cointegrazione $r=2$.
+```{r, fig.width=7, fig.height=6}
+modVAR <- vec2var(vecm, r = 2)
+modVAR
+prev <- predict(modVAR, n.ahead = NROW(test))
+consumi_prev <- prev$fcst$prezzi_consumo_cpi[,1]
+plot(as.numeric(test[, "prezzi_consumo_cpi"]), type = "l")
+lines(consumi_prev, col = 2)
+```
+Il confronto grafico tra i dati osservati del set di test e le previsioni generate dal modello fornisce indicazioni cruciali sulla capacità del sistema di operare in contesti reali.
+L'andamento della linea rossa mostra che il modello riesce a seguire in modo sufficiente la traiettoria dei dati fino a tutto il 2019, catturando correttamente la tendenza di fondo dei prezzi al consumo. Tuttavia, emerge una sistematica sottostima dei valori osservati lungo gran parte dell'orizzonte previsivo. Il modello, pur essendo strutturalmente solido, tende a produrre stime più conservative rispetto ai livelli effettivamente raggiunti dal CPI.
+A partire dal 2020, si osserva una netta divergenza tra le due serie. Questo scostamento è causato dallo shock globale senza precedenti dovuto alla pandemia di COVID-19. Essendo un evento anomalo ed esogeno, che non trova riscontro nelle dinamiche storiche utilizzate per l'addestramento, il modello non ha gli strumenti statistici per prevederlo né per adattarsi istantaneamente a tale rottura strutturale.
+
+# Conclusione
+L'analisi ha dimostrato che il prezzo del petrolio agisce come principale motore esogeno del sistema, esercitando una pressione significativa e persistente sui prezzi al consumo e alla produzione. Sebbene i test di causalità e le funzioni di risposta agli impulsi abbiano confermato la validità del modello VAR nella cattura delle dinamiche di breve periodo, l'individuazione di una relazione di cointegrazione ha permesso di definire un equilibrio di lungo periodo in cui il CPI risulta fortemente ancorato ai costi industriali. Tuttavia, la fase di previsione ha evidenziato i limiti intrinseci della modellistica lineare: mentre il sistema si è dimostrato affidabile e statisticamente superiore ai modelli ARIMA fino al 2019, l'insorgere della crisi pandemica nel 2020 ha generato una rottura strutturale imprevedibile. Questo scostamento finale sottolinea come, nonostante il rigore tecnico del modello, la previsione macroeconomica rimanga vulnerabile a eventi eccezionali.
